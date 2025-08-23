@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- A3 portrait with 3mm bleed (trim: 297x420mm, bleed: 303x426mm) -->
+<svg xmlns="http://www.w3.org/2000/svg" width="303mm" height="426mm" viewBox="0 0 303 426" version="1.1">
+  <title>Print Banner — A3 with 3mm bleed (Yashodha only)</title>
+  <desc>Place your image at assets/yashodha.jpg. Full-bleed image; crop marks included; remove guides before print if desired.</desc>
+
+  <!-- Bleed area background (non-printing if your RIP ignores) -->
+  <rect x="0" y="0" width="303" height="426" fill="#ffffff"/>
+
+  <!-- Full-bleed image: fills trim area from 3mm to 300mm (297x420) -->
+  <image href="assets/yashodha.jpg" x="3" y="3" width="297" height="420" preserveAspectRatio="xMidYMid slice"/>
+
+  <!-- Optional overlay text (toggle visibility as needed) -->
+  <!--
+  <g aria-label="banner-text" opacity="0.0">
+    <rect x="3" y="370" width="297" height="53" fill="rgba(0,0,0,0.35)"/>
+    <text x="18" y="405" fill="#ffffff" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600">Yashodha</text>
+  </g>
+  -->
+
+  <!-- Crop marks (outside trim) -->
+  <g stroke="#000000" stroke-width="0.2" fill="none">
+    <!-- Top-left -->
+    <path d="M3,0 v2.5 M0,3 h2.5"/>
+    <!-- Top-right -->
+    <path d="M300,0 v2.5 M303,3 h-2.5"/>
+    <!-- Bottom-left -->
+    <path d="M3,426 v-2.5 M0,423 h2.5"/>
+    <!-- Bottom-right -->
+    <path d="M300,426 v-2.5 M303,423 h-2.5"/>
+  </g>
+
+  <!-- Trim box outline (guide) -->
+  <rect x="3" y="3" width="297" height="420" fill="none" stroke="#888" stroke-width="0.2" stroke-dasharray="2 2"/>
+</svg>
+
+
