@@ -12,7 +12,9 @@
       body{font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;color:var(--ink);font-size:14px}
       .page{max-width:840px;margin:0 auto;padding:30px}
       h1{margin:0 0 4px;font-size:24px;font-weight:700}
-      .meta{display:flex;gap:16px;flex-wrap:wrap;color:var(--muted);margin-bottom:14px;font-size:12.5px}
+      .meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 16px;color:var(--muted);margin-bottom:14px;font-size:12.5px;align-items:center}
+      @media (max-width:560px){.meta{grid-template-columns:1fr}}
+      .meta a{overflow-wrap:anywhere}
       .section{margin:20px 0 0}
       .section h2{margin:0 0 8px;font-size:14px;text-transform:uppercase;letter-spacing:.08em}
       .item{margin:10px 0}
@@ -91,7 +93,6 @@
             <li>Developed web scrapers using Java libraries (Jsoup) to extract product information from various e‑commerce websites.</li>
             <li>Implemented Spring Boot REST microservices to retrieve and display product information in the user interface.</li>
             <li>Designed the user interface using HTML, CSS, and JavaScript, following UX/UI principles.</li>
-            <li>Used MySQL for database storage and querying.</li>
           </ul>
         </div>
         <div class="item">
