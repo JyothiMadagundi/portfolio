@@ -1495,3 +1495,73 @@ body {
     animation: fadeIn 0.3s ease;
 }
 
+/* Firebase Configuration Warning */
+.config-warning {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 10000;
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    padding: 20px;
+    animation: slideDown 0.3s ease;
+}
+
+@keyframes slideDown {
+    from { transform: translateY(-100%); }
+    to { transform: translateY(0); }
+}
+
+.config-warning .warning-content {
+    max-width: 800px;
+    margin: 0 auto;
+    color: #1a1a1a;
+}
+
+.config-warning strong {
+    font-size: 1.1rem;
+    display: block;
+    margin-bottom: 10px;
+}
+
+.config-warning p {
+    margin-bottom: 10px;
+}
+
+.config-warning ol {
+    margin: 10px 0 15px 20px;
+}
+
+.config-warning li {
+    margin-bottom: 5px;
+}
+
+.config-warning a {
+    color: #1a1a1a;
+    font-weight: 600;
+    text-decoration: underline;
+}
+
+.config-warning code {
+    background: rgba(0, 0, 0, 0.15);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+}
+
+.config-warning button {
+    background: #1a1a1a;
+    color: #f59e0b;
+    border: none;
+    padding: 8px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.9rem;
+    transition: var(--transition);
+}
+
+.config-warning button:hover {
+    background: #333;
+}
+

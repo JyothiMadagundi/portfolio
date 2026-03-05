@@ -1,22 +1,128 @@
-// QBO Script Tracker - Application Logic
+// QBO Script Tracker - Application Logic with Firebase
 
-// Data Management
-const STORAGE_KEY = 'qbo_tracker_entries';
-const DB_NAME = 'qbo_tracker_files';
-const DB_VERSION = 1;
+// =====================================================
+// FIREBASE CONFIGURATION - UPDATE THESE VALUES!
+// =====================================================
+// Go to https://console.firebase.google.com
+// 1. Create a new project (or use existing)
+// 2. Add a web app
+// 3. Copy your config values below
+// 4. Enable Firestore Database and Storage in Firebase console
+
+const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT_ID.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+};
+
+// Check if Firebase is configured
+const isFirebaseConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY";
+
+// Initialize Firebase (only if configured)
 let db = null;
+let storage = null;
 
-// Initialize IndexedDB for file storage
-function initDB() {
+if (isFirebaseConfigured) {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+    storage = firebase.storage();
+}
+
+// =====================================================
+// DATA MANAGEMENT
+// =====================================================
+
+// Get all entries from Firebase or localStorage
+async function getEntries() {
+    if (isFirebaseConfigured) {
+        try {
+            const snapshot = await db.collection('entries').orderBy('createdAt', 'desc').get();
+            return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        } catch (error) {
+            console.error('Error getting entries:', error);
+            showToast('Error loading data from cloud', 'error');
+            return [];
+        }
+    } else {
+        // Fallback to localStorage
+        const data = localStorage.getItem('qbo_tracker_entries');
+        return data ? JSON.parse(data) : [];
+    }
+}
+
+// Save entry to Firebase or localStorage
+async function saveEntry(entryData) {
+    if (isFirebaseConfigured) {
+        try {
+            if (entryData.id) {
+                // Update existing
+                await db.collection('entries').doc(entryData.id).update(entryData);
+            } else {
+                // Add new
+                const docRef = await db.collection('entries').add(entryData);
+                entryData.id = docRef.id;
+            }
+            return entryData;
+        } catch (error) {
+            console.error('Error saving entry:', error);
+            showToast('Error saving to cloud', 'error');
+            return null;
+        }
+    } else {
+        // Fallback to localStorage
+        const entries = JSON.parse(localStorage.getItem('qbo_tracker_entries') || '[]');
+        if (entryData.id) {
+            const index = entries.findIndex(e => e.id === entryData.id);
+            if (index !== -1) entries[index] = entryData;
+        } else {
+            entryData.id = generateId();
+            entries.unshift(entryData);
+        }
+        localStorage.setItem('qbo_tracker_entries', JSON.stringify(entries));
+        return entryData;
+    }
+}
+
+// Delete entry from Firebase or localStorage
+async function deleteEntryFromDB(entryId) {
+    if (isFirebaseConfigured) {
+        try {
+            await db.collection('entries').doc(entryId).delete();
+            // Also delete associated files
+            await deleteFilesForEntry(entryId);
+        } catch (error) {
+            console.error('Error deleting entry:', error);
+            showToast('Error deleting from cloud', 'error');
+        }
+    } else {
+        let entries = JSON.parse(localStorage.getItem('qbo_tracker_entries') || '[]');
+        entries = entries.filter(e => e.id !== entryId);
+        localStorage.setItem('qbo_tracker_entries', JSON.stringify(entries));
+    }
+}
+
+function generateId() {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2);
+}
+
+// =====================================================
+// FILE STORAGE (Firebase Storage or IndexedDB)
+// =====================================================
+
+let localDB = null;
+
+// Initialize local IndexedDB for fallback
+function initLocalDB() {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
-        
+        const request = indexedDB.open('qbo_tracker_files', 1);
         request.onerror = () => reject(request.error);
         request.onsuccess = () => {
-            db = request.result;
-            resolve(db);
+            localDB = request.result;
+            resolve(localDB);
         };
-        
         request.onupgradeneeded = (event) => {
             const database = event.target.result;
             if (!database.objectStoreNames.contains('files')) {
@@ -27,82 +133,147 @@ function initDB() {
     });
 }
 
-function getEntries() {
-    const data = localStorage.getItem(STORAGE_KEY);
-    return data ? JSON.parse(data) : [];
-}
-
-function saveEntries(entries) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
-}
-
-function generateId() {
-    return Date.now().toString(36) + Math.random().toString(36).substr(2);
-}
-
-// File Storage Functions
+// Save file to Firebase Storage or IndexedDB
 async function saveFile(entryId, file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            const fileData = {
-                id: generateId(),
-                entryId: entryId,
-                name: file.name,
-                type: file.type,
-                size: file.size,
-                data: reader.result,
-                uploadedAt: new Date().toISOString()
+    const fileId = generateId();
+    const fileData = {
+        id: fileId,
+        entryId: entryId,
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        uploadedAt: new Date().toISOString()
+    };
+
+    if (isFirebaseConfigured) {
+        try {
+            // Upload to Firebase Storage
+            const storageRef = storage.ref(`files/${entryId}/${fileId}_${file.name}`);
+            await storageRef.put(file);
+            fileData.storagePath = storageRef.fullPath;
+            fileData.downloadURL = await storageRef.getDownloadURL();
+            
+            // Save metadata to Firestore
+            await db.collection('files').doc(fileId).set(fileData);
+            return fileData;
+        } catch (error) {
+            console.error('Error uploading file:', error);
+            showToast('Error uploading file to cloud', 'error');
+            return null;
+        }
+    } else {
+        // Fallback to IndexedDB
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                fileData.data = reader.result;
+                const transaction = localDB.transaction(['files'], 'readwrite');
+                const store = transaction.objectStore('files');
+                const request = store.add(fileData);
+                request.onsuccess = () => resolve(fileData);
+                request.onerror = () => reject(request.error);
             };
-            
-            const transaction = db.transaction(['files'], 'readwrite');
-            const store = transaction.objectStore('files');
-            const request = store.add(fileData);
-            
-            request.onsuccess = () => resolve(fileData);
-            request.onerror = () => reject(request.error);
-        };
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(file);
-    });
-}
-
-async function getFilesForEntry(entryId) {
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(['files'], 'readonly');
-        const store = transaction.objectStore('files');
-        const index = store.index('entryId');
-        const request = index.getAll(entryId);
-        
-        request.onsuccess = () => resolve(request.result || []);
-        request.onerror = () => reject(request.error);
-    });
-}
-
-async function deleteFile(fileId) {
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction(['files'], 'readwrite');
-        const store = transaction.objectStore('files');
-        const request = store.delete(fileId);
-        
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-    });
-}
-
-async function deleteFilesForEntry(entryId) {
-    const files = await getFilesForEntry(entryId);
-    for (const file of files) {
-        await deleteFile(file.id);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+        });
     }
 }
 
+// Get files for an entry
+async function getFilesForEntry(entryId) {
+    if (isFirebaseConfigured) {
+        try {
+            const snapshot = await db.collection('files').where('entryId', '==', entryId).get();
+            return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        } catch (error) {
+            console.error('Error getting files:', error);
+            return [];
+        }
+    } else {
+        return new Promise((resolve, reject) => {
+            const transaction = localDB.transaction(['files'], 'readonly');
+            const store = transaction.objectStore('files');
+            const index = store.index('entryId');
+            const request = index.getAll(entryId);
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+}
+
+// Delete a file
+async function deleteFile(fileId, storagePath) {
+    if (isFirebaseConfigured) {
+        try {
+            // Delete from Storage
+            if (storagePath) {
+                await storage.ref(storagePath).delete();
+            }
+            // Delete metadata from Firestore
+            await db.collection('files').doc(fileId).delete();
+        } catch (error) {
+            console.error('Error deleting file:', error);
+        }
+    } else {
+        return new Promise((resolve, reject) => {
+            const transaction = localDB.transaction(['files'], 'readwrite');
+            const store = transaction.objectStore('files');
+            const request = store.delete(fileId);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+}
+
+// Delete all files for an entry
+async function deleteFilesForEntry(entryId) {
+    const files = await getFilesForEntry(entryId);
+    for (const file of files) {
+        await deleteFile(file.id, file.storagePath);
+    }
+}
+
+// Get file count for an entry
 async function getFileCount(entryId) {
     const files = await getFilesForEntry(entryId);
     return files.length;
 }
 
-// DOM Elements
+// Download a file
+async function downloadFileById(fileId) {
+    if (isFirebaseConfigured) {
+        try {
+            const doc = await db.collection('files').doc(fileId).get();
+            if (doc.exists) {
+                const file = doc.data();
+                window.open(file.downloadURL, '_blank');
+            }
+        } catch (error) {
+            console.error('Error downloading file:', error);
+            showToast('Error downloading file', 'error');
+        }
+    } else {
+        const transaction = localDB.transaction(['files'], 'readonly');
+        const store = transaction.objectStore('files');
+        const request = store.get(fileId);
+        request.onsuccess = () => {
+            const file = request.result;
+            if (file) {
+                const link = document.createElement('a');
+                link.href = file.data;
+                link.download = file.name;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+        };
+    }
+}
+
+// =====================================================
+// DOM ELEMENTS
+// =====================================================
+
 const elements = {
     // Navigation
     navItems: document.querySelectorAll('.nav-item'),
@@ -194,24 +365,61 @@ const elements = {
 };
 
 let deleteTargetId = null;
-let currentEntryFiles = []; // Temporary storage for files during entry creation/edit
+let currentEntryFiles = [];
 let currentAttachmentsEntryId = null;
+let allEntries = []; // Cache for filtered views
 
-// Initialize
+// =====================================================
+// INITIALIZATION
+// =====================================================
+
 document.addEventListener('DOMContentLoaded', async () => {
-    await initDB();
+    // Show config warning if Firebase not configured
+    if (!isFirebaseConfigured) {
+        showConfigWarning();
+    }
+    
+    await initLocalDB();
     initNavigation();
     initModal();
     initFilters();
     initImportExport();
     initFileUpload();
     initAttachmentsModal();
-    updateDashboard();
-    renderEntries();
-    renderBanks();
+    
+    await refreshData();
 });
 
-// Navigation
+function showConfigWarning() {
+    const warning = document.createElement('div');
+    warning.className = 'config-warning';
+    warning.innerHTML = `
+        <div class="warning-content">
+            <strong>⚠️ Firebase Not Configured</strong>
+            <p>Data is being saved locally only. To enable cloud sync for all team members:</p>
+            <ol>
+                <li>Go to <a href="https://console.firebase.google.com" target="_blank">Firebase Console</a></li>
+                <li>Create a project and add a web app</li>
+                <li>Update the config in <code>app.js</code></li>
+                <li>Enable Firestore Database and Storage</li>
+            </ol>
+            <button onclick="this.parentElement.parentElement.remove()">Dismiss</button>
+        </div>
+    `;
+    document.body.appendChild(warning);
+}
+
+async function refreshData() {
+    allEntries = await getEntries();
+    updateDashboard();
+    await renderEntries();
+    renderBanks();
+}
+
+// =====================================================
+// NAVIGATION
+// =====================================================
+
 function initNavigation() {
     elements.navItems.forEach(item => {
         item.addEventListener('click', (e) => {
@@ -230,13 +438,11 @@ function initNavigation() {
     });
 }
 
-function switchView(viewName) {
-    // Update nav items
+async function switchView(viewName) {
     elements.navItems.forEach(item => {
         item.classList.toggle('active', item.dataset.view === viewName);
     });
     
-    // Update views
     document.querySelectorAll('.view').forEach(view => {
         view.classList.remove('active');
     });
@@ -254,9 +460,8 @@ function switchView(viewName) {
         targetView.classList.add('active');
     }
     
-    // Refresh data
     if (viewName === 'entries') {
-        renderEntries();
+        await renderEntries();
     } else if (viewName === 'banks') {
         renderBanks();
     } else {
@@ -264,7 +469,10 @@ function switchView(viewName) {
     }
 }
 
-// Modal Management
+// =====================================================
+// MODAL MANAGEMENT
+// =====================================================
+
 function initModal() {
     elements.addEntryBtn.addEventListener('click', () => openModal());
     elements.closeModal.addEventListener('click', closeEntryModal);
@@ -275,7 +483,6 @@ function initModal() {
     elements.cancelDeleteBtn.addEventListener('click', closeDeleteModal);
     elements.confirmDeleteBtn.addEventListener('click', confirmDelete);
     
-    // Close modal on overlay click
     elements.entryModal.addEventListener('click', (e) => {
         if (e.target === elements.entryModal) closeEntryModal();
     });
@@ -287,24 +494,23 @@ function initModal() {
 
 async function openModal(entry = null) {
     elements.entryModal.classList.add('active');
-    currentEntryFiles = []; // Clear temporary files
+    currentEntryFiles = [];
     
     if (entry) {
         elements.modalTitle.textContent = 'Edit Entry';
         elements.entryId.value = entry.id;
         elements.provider.value = entry.provider || '';
-        elements.bankName.value = entry.bankName;
-        elements.customerId.value = entry.customerId;
-        elements.callType.value = entry.callType;
+        elements.bankName.value = entry.bankName || '';
+        elements.customerId.value = entry.customerId || '';
+        elements.callType.value = entry.callType || '';
         elements.requestedBy.value = entry.requestedBy || '';
         elements.attendedBy.value = entry.attendedBy || '';
         elements.callBookedDate.value = entry.callBookedDate || '';
-        elements.status.value = entry.status;
+        elements.status.value = entry.status || 'pending';
         elements.connectionStatus.value = entry.connectionStatus || 'not_tested';
         elements.errorCode.value = entry.errorCode || '';
         elements.notes.value = entry.notes || '';
         
-        // Load existing files for display (but don't re-save them)
         const existingFiles = await getFilesForEntry(entry.id);
         renderExistingFiles(existingFiles);
     } else {
@@ -352,7 +558,6 @@ function closeEntryModal() {
 async function handleFormSubmit(e) {
     e.preventDefault();
     
-    const entries = getEntries();
     const entryData = {
         provider: elements.provider.value.trim(),
         bankName: elements.bankName.value.trim(),
@@ -368,43 +573,34 @@ async function handleFormSubmit(e) {
         updatedAt: new Date().toISOString()
     };
     
-    let entryId;
+    const isEditing = !!elements.entryId.value;
     
-    if (elements.entryId.value) {
-        // Edit existing
-        entryId = elements.entryId.value;
-        const index = entries.findIndex(e => e.id === entryId);
-        if (index !== -1) {
-            entries[index] = { ...entries[index], ...entryData };
-        }
+    if (isEditing) {
+        entryData.id = elements.entryId.value;
     } else {
-        // Add new
-        entryId = generateId();
-        entryData.id = entryId;
         entryData.createdAt = new Date().toISOString();
-        entries.unshift(entryData);
     }
     
-    saveEntries(entries);
+    const savedEntry = await saveEntry(entryData);
     
-    // Save any new files
-    if (currentEntryFiles.length > 0) {
-        for (const f of currentEntryFiles) {
-            try {
-                await saveFile(entryId, f.file);
-            } catch (error) {
-                console.error('Error saving file:', error);
+    if (savedEntry) {
+        // Save any new files
+        if (currentEntryFiles.length > 0) {
+            for (const f of currentEntryFiles) {
+                try {
+                    await saveFile(savedEntry.id, f.file);
+                } catch (error) {
+                    console.error('Error saving file:', error);
+                }
             }
+            currentEntryFiles = [];
         }
-        currentEntryFiles = [];
+        
+        showToast(isEditing ? 'Entry updated successfully' : 'Entry added successfully', 'success');
     }
-    
-    showToast(elements.entryId.value ? 'Entry updated successfully' : 'Entry added successfully', 'success');
     
     closeEntryModal();
-    updateDashboard();
-    renderEntries();
-    renderBanks();
+    await refreshData();
 }
 
 function openDeleteModal(id) {
@@ -420,28 +616,23 @@ function closeDeleteModal() {
 async function confirmDelete() {
     if (!deleteTargetId) return;
     
-    // Delete associated files first
-    await deleteFilesForEntry(deleteTargetId);
-    
-    let entries = getEntries();
-    entries = entries.filter(e => e.id !== deleteTargetId);
-    saveEntries(entries);
+    await deleteEntryFromDB(deleteTargetId);
     
     closeDeleteModal();
     showToast('Entry and attachments deleted', 'success');
-    updateDashboard();
-    renderEntries();
-    renderBanks();
+    await refreshData();
 }
 
-// Filters
+// =====================================================
+// FILTERS
+// =====================================================
+
 function initFilters() {
-    elements.searchInput.addEventListener('input', renderEntries);
-    elements.filterCallType.addEventListener('change', renderEntries);
-    elements.filterStatus.addEventListener('change', renderEntries);
+    elements.searchInput.addEventListener('input', () => renderEntries());
+    elements.filterCallType.addEventListener('change', () => renderEntries());
+    elements.filterStatus.addEventListener('change', () => renderEntries());
     
-    // Date range filter
-    elements.applyDateFilter.addEventListener('click', renderEntries);
+    elements.applyDateFilter.addEventListener('click', () => renderEntries());
     elements.clearDateFilter.addEventListener('click', () => {
         elements.dateFrom.value = '';
         elements.dateTo.value = '';
@@ -450,7 +641,7 @@ function initFilters() {
 }
 
 function getFilteredEntries() {
-    let entries = getEntries();
+    let entries = [...allEntries];
     const search = elements.searchInput.value.toLowerCase();
     const callType = elements.filterCallType.value;
     const status = elements.filterStatus.value;
@@ -459,12 +650,12 @@ function getFilteredEntries() {
     
     if (search) {
         entries = entries.filter(e => 
-            e.bankName.toLowerCase().includes(search) ||
-            e.customerId.toLowerCase().includes(search) ||
-            (e.provider && e.provider.toLowerCase().includes(search)) ||
-            (e.requestedBy && e.requestedBy.toLowerCase().includes(search)) ||
-            (e.attendedBy && e.attendedBy.toLowerCase().includes(search)) ||
-            (e.notes && e.notes.toLowerCase().includes(search))
+            (e.bankName || '').toLowerCase().includes(search) ||
+            (e.customerId || '').toLowerCase().includes(search) ||
+            (e.provider || '').toLowerCase().includes(search) ||
+            (e.requestedBy || '').toLowerCase().includes(search) ||
+            (e.attendedBy || '').toLowerCase().includes(search) ||
+            (e.notes || '').toLowerCase().includes(search)
         );
     }
     
@@ -476,7 +667,6 @@ function getFilteredEntries() {
         entries = entries.filter(e => e.status === status);
     }
     
-    // Date range filter
     if (dateFrom) {
         const fromDate = new Date(dateFrom);
         fromDate.setHours(0, 0, 0, 0);
@@ -498,24 +688,15 @@ function getFilteredEntries() {
     return entries;
 }
 
-// Dashboard
+// =====================================================
+// DASHBOARD
+// =====================================================
+
 function updateDashboard() {
-    const entries = getEntries();
+    const entries = allEntries;
     
-    // Status counts
-    const statusCounts = {
-        pending: 0,
-        in_progress: 0,
-        completed: 0,
-        error: 0
-    };
-    
-    // Call type counts
-    const callTypeCounts = {
-        har_collection: 0,
-        verification_attempt: 0,
-        issue_check: 0
-    };
+    const statusCounts = { pending: 0, in_progress: 0, completed: 0, error: 0 };
+    const callTypeCounts = { har_collection: 0, verification_attempt: 0, issue_check: 0 };
     
     entries.forEach(entry => {
         if (statusCounts.hasOwnProperty(entry.status)) {
@@ -526,7 +707,6 @@ function updateDashboard() {
         }
     });
     
-    // Update stats
     elements.statPending.textContent = statusCounts.pending;
     elements.statInProgress.textContent = statusCounts.in_progress;
     elements.statCompleted.textContent = statusCounts.completed;
@@ -536,7 +716,6 @@ function updateDashboard() {
     elements.countAttempt.textContent = callTypeCounts.verification_attempt;
     elements.countIssue.textContent = callTypeCounts.issue_check;
     
-    // Render recent entries
     renderRecentEntries(entries.slice(0, 5));
 }
 
@@ -567,7 +746,10 @@ function renderRecentEntries(entries) {
     `).join('');
 }
 
-// Entries Table
+// =====================================================
+// ENTRIES TABLE
+// =====================================================
+
 async function renderEntries() {
     const entries = getFilteredEntries();
     
@@ -579,7 +761,7 @@ async function renderEntries() {
     
     elements.emptyState.classList.remove('visible');
     
-    // Get file counts for all entries
+    // Get file counts
     const fileCounts = {};
     for (const entry of entries) {
         fileCounts[entry.id] = await getFileCount(entry.id);
@@ -629,10 +811,9 @@ async function renderEntries() {
     `}).join('');
 }
 
-// Global functions for inline handlers
+// Global functions
 window.editEntry = async function(id) {
-    const entries = getEntries();
-    const entry = entries.find(e => e.id === id);
+    const entry = allEntries.find(e => e.id === id);
     if (entry) {
         await openModal(entry);
     }
@@ -642,13 +823,15 @@ window.deleteEntry = function(id) {
     openDeleteModal(id);
 };
 
-// Banks View
+// =====================================================
+// BANKS VIEW
+// =====================================================
+
 function renderBanks() {
-    const entries = getEntries();
+    const entries = allEntries;
     const bankMap = new Map();
     
     entries.forEach(entry => {
-        // Create unique key combining provider and bank
         const key = `${entry.provider || 'Unknown'}_${entry.bankName}`;
         if (!bankMap.has(key)) {
             bankMap.set(key, {
@@ -726,17 +909,17 @@ function renderBanks() {
     `).join('');
 }
 
-// File Upload
+// =====================================================
+// FILE UPLOAD
+// =====================================================
+
 function initFileUpload() {
-    // Click to upload
     elements.fileUploadPrompt.addEventListener('click', () => {
         elements.fileInput.click();
     });
     
-    // File input change
     elements.fileInput.addEventListener('change', handleFileSelect);
     
-    // Drag and drop
     elements.fileUploadArea.addEventListener('dragover', (e) => {
         e.preventDefault();
         elements.fileUploadArea.classList.add('drag-over');
@@ -749,19 +932,17 @@ function initFileUpload() {
     elements.fileUploadArea.addEventListener('drop', (e) => {
         e.preventDefault();
         elements.fileUploadArea.classList.remove('drag-over');
-        const files = e.dataTransfer.files;
-        processFiles(files);
+        processFiles(e.dataTransfer.files);
     });
 }
 
 function handleFileSelect(e) {
-    const files = e.target.files;
-    processFiles(files);
-    e.target.value = ''; // Reset input
+    processFiles(e.target.files);
+    e.target.value = '';
 }
 
 function processFiles(files) {
-    const maxSize = 10 * 1024 * 1024; // 10MB
+    const maxSize = 10 * 1024 * 1024;
     const allowedTypes = ['har', 'html', 'htm', 'png', 'jpg', 'jpeg', 'gif', 'pdf', 'txt', 'json'];
     
     for (const file of files) {
@@ -777,7 +958,6 @@ function processFiles(files) {
             continue;
         }
         
-        // Add to temporary files list
         currentEntryFiles.push({
             tempId: generateId(),
             file: file,
@@ -824,7 +1004,10 @@ window.removeAttachedFile = function(tempId) {
     renderAttachedFiles();
 };
 
-// Attachments Modal
+// =====================================================
+// ATTACHMENTS MODAL
+// =====================================================
+
 function initAttachmentsModal() {
     elements.closeAttachmentsModal.addEventListener('click', closeAttachmentsModal);
     elements.attachmentsModal.addEventListener('click', (e) => {
@@ -836,18 +1019,16 @@ function initAttachmentsModal() {
     });
     
     elements.addFilesInput.addEventListener('change', async (e) => {
-        const files = e.target.files;
-        await addFilesToEntry(currentAttachmentsEntryId, files);
+        await addFilesToEntry(currentAttachmentsEntryId, e.target.files);
         e.target.value = '';
         await renderAttachmentsModalFiles(currentAttachmentsEntryId);
-        renderEntries(); // Refresh table
+        await refreshData();
     });
 }
 
 async function openAttachmentsModal(entryId) {
     currentAttachmentsEntryId = entryId;
-    const entries = getEntries();
-    const entry = entries.find(e => e.id === entryId);
+    const entry = allEntries.find(e => e.id === entryId);
     
     if (!entry) return;
     
@@ -859,6 +1040,8 @@ async function openAttachmentsModal(entryId) {
     await renderAttachmentsModalFiles(entryId);
     elements.attachmentsModal.classList.add('active');
 }
+
+window.openAttachmentsModal = openAttachmentsModal;
 
 async function renderAttachmentsModalFiles(entryId) {
     const files = await getFilesForEntry(entryId);
@@ -890,7 +1073,7 @@ async function renderAttachmentsModalFiles(entryId) {
                         <line x1="12" y1="15" x2="12" y2="3"/>
                     </svg>
                 </button>
-                <button class="file-action-btn delete" title="Delete" onclick="deleteAttachment('${f.id}')">
+                <button class="file-action-btn delete" title="Delete" onclick="deleteAttachment('${f.id}', '${f.storagePath || ''}')">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"/>
                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
@@ -933,76 +1116,37 @@ async function addFilesToEntry(entryId, files) {
     showToast('Files uploaded successfully', 'success');
 }
 
-window.openAttachmentsModal = openAttachmentsModal;
-
 window.downloadFile = async function(fileId) {
-    const transaction = db.transaction(['files'], 'readonly');
-    const store = transaction.objectStore('files');
-    const request = store.get(fileId);
-    
-    request.onsuccess = () => {
-        const file = request.result;
-        if (file) {
-            const link = document.createElement('a');
-            link.href = file.data;
-            link.download = file.name;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
-    };
+    await downloadFileById(fileId);
 };
 
-window.deleteAttachment = async function(fileId) {
+window.deleteAttachment = async function(fileId, storagePath) {
     if (confirm('Delete this attachment?')) {
-        await deleteFile(fileId);
+        await deleteFile(fileId, storagePath);
         await renderAttachmentsModalFiles(currentAttachmentsEntryId);
-        renderEntries();
+        await refreshData();
         showToast('Attachment deleted', 'success');
     }
 };
 
-// File utility functions
-function getFileIconClass(filename) {
-    const ext = filename.split('.').pop().toLowerCase();
-    if (ext === 'har') return 'har';
-    if (['html', 'htm'].includes(ext)) return 'html';
-    if (['png', 'jpg', 'jpeg', 'gif'].includes(ext)) return 'image';
-    if (ext === 'pdf') return 'pdf';
-    return 'other';
-}
+// =====================================================
+// IMPORT/EXPORT
+// =====================================================
 
-function getFileIcon(filename) {
-    const ext = filename.split('.').pop().toLowerCase();
-    if (ext === 'har') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
-    if (['html', 'htm'].includes(ext)) return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
-    if (['png', 'jpg', 'jpeg', 'gif'].includes(ext)) return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
-    if (ext === 'pdf') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
-    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
-}
-
-function formatFileSize(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-}
-
-// Import/Export
 function initImportExport() {
     elements.exportBtn.addEventListener('click', exportData);
     elements.importBtn.addEventListener('click', () => elements.importFile.click());
     elements.importFile.addEventListener('change', importData);
 }
 
-function exportData() {
-    const entries = getEntries();
+async function exportData() {
+    const entries = allEntries;
     
     if (entries.length === 0) {
         showToast('No entries to export', 'error');
         return;
     }
     
-    // Prepare data for Excel
     const excelData = entries.map(entry => ({
         'Created Date': formatDate(entry.createdAt),
         'Call Booked Date': entry.callBookedDate ? formatDateInput(entry.callBookedDate) : '',
@@ -1022,128 +1166,84 @@ function exportData() {
         'ID': entry.id
     }));
     
-    // Create workbook and worksheet
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.json_to_sheet(excelData);
     
-    // Set column widths
     ws['!cols'] = [
-        { wch: 12 },  // Created Date
-        { wch: 14 },  // Call Booked Date
-        { wch: 15 },  // Provider
-        { wch: 20 },  // Bank Name
-        { wch: 18 },  // Customer/Case ID
-        { wch: 20 },  // Call Type
-        { wch: 15 },  // Requested By
-        { wch: 15 },  // Attended By
-        { wch: 12 },  // Status
-        { wch: 18 },  // Connection Status
-        { wch: 15 },  // Error Code
-        { wch: 30 },  // Notes
-        { wch: 22 },  // Created At
-        { wch: 22 },  // Updated At
-        { wch: 14 },  // Call Booked Date Raw
-        { wch: 20 },  // ID
+        { wch: 12 }, { wch: 14 }, { wch: 15 }, { wch: 20 },
+        { wch: 18 }, { wch: 20 }, { wch: 15 }, { wch: 15 },
+        { wch: 12 }, { wch: 18 }, { wch: 15 }, { wch: 30 },
+        { wch: 22 }, { wch: 22 }, { wch: 14 }, { wch: 20 }
     ];
     
     XLSX.utils.book_append_sheet(wb, ws, 'QBO Tracker Data');
     
-    // Generate and download file
     const fileName = `qbo-tracker-export-${new Date().toISOString().split('T')[0]}.xlsx`;
     XLSX.writeFile(wb, fileName);
     
     showToast('Data exported to Excel successfully', 'success');
 }
 
-function importData(e) {
+async function importData(e) {
     const file = e.target.files[0];
     if (!file) return;
     
     const reader = new FileReader();
-    reader.onload = function(event) {
+    reader.onload = async function(event) {
         try {
-            // Read Excel file
             const data = new Uint8Array(event.target.result);
             const workbook = XLSX.read(data, { type: 'array' });
             
-            // Get first sheet
             const sheetName = workbook.SheetNames[0];
             const worksheet = workbook.Sheets[sheetName];
-            
-            // Convert to JSON
             const jsonData = XLSX.utils.sheet_to_json(worksheet);
             
             if (jsonData.length === 0) {
                 throw new Error('No data found in Excel file');
             }
             
-            // Map Excel columns to entry fields
-            const importedEntries = jsonData.map(row => {
-                // Try to find the ID column or generate new ID
-                const id = row['ID'] || row['id'] || generateId();
-                
-                return {
-                    id: id,
+            let importedCount = 0;
+            
+            for (const row of jsonData) {
+                const entryData = {
                     provider: row['Provider'] || row['provider'] || '',
                     bankName: row['Bank Name'] || row['bankName'] || row['Bank'] || '',
-                    customerId: row['Customer/Case ID'] || row['customerId'] || row['Case ID'] || row['Customer ID'] || '',
+                    customerId: row['Customer/Case ID'] || row['customerId'] || row['Case ID'] || '',
                     callType: mapCallType(row['Call Type'] || row['callType'] || ''),
                     requestedBy: row['Requested By'] || row['requestedBy'] || '',
                     attendedBy: row['Attended By'] || row['attendedBy'] || '',
-                    callBookedDate: row['Call Booked Date Raw'] || row['Call Booked Date'] || row['callBookedDate'] || '',
+                    callBookedDate: row['Call Booked Date Raw'] || row['Call Booked Date'] || '',
                     status: mapStatus(row['Status'] || row['status'] || 'pending'),
-                    connectionStatus: mapConnectionStatus(row['Connection Status'] || row['connectionStatus'] || 'not_tested'),
+                    connectionStatus: mapConnectionStatus(row['Connection Status'] || ''),
                     errorCode: row['Error Code'] || row['errorCode'] || '',
                     notes: row['Notes'] || row['notes'] || '',
                     createdAt: row['Created At'] || row['createdAt'] || new Date().toISOString(),
-                    updatedAt: row['Updated At'] || row['updatedAt'] || new Date().toISOString()
+                    updatedAt: new Date().toISOString()
                 };
-            });
-            
-            // Validate entries - must have bank name and case ID
-            const validEntries = importedEntries.filter(entry => 
-                entry.bankName && entry.customerId
-            );
-            
-            if (validEntries.length === 0) {
-                throw new Error('No valid entries found. Ensure "Bank Name" and "Customer/Case ID" columns exist.');
+                
+                if (entryData.bankName && entryData.customerId) {
+                    await saveEntry(entryData);
+                    importedCount++;
+                }
             }
             
-            // Merge with existing entries (avoid duplicates by id)
-            const existingEntries = getEntries();
-            const existingIds = new Set(existingEntries.map(e => e.id));
-            
-            const newEntries = validEntries.filter(e => !existingIds.has(e.id));
-            const mergedEntries = [...newEntries, ...existingEntries];
-            
-            saveEntries(mergedEntries);
-            showToast(`Imported ${newEntries.length} new entries from Excel`, 'success');
-            
-            updateDashboard();
-            renderEntries();
-            renderBanks();
+            showToast(`Imported ${importedCount} entries`, 'success');
+            await refreshData();
         } catch (error) {
             showToast('Error importing Excel: ' + error.message, 'error');
         }
     };
     
     reader.readAsArrayBuffer(file);
-    e.target.value = ''; // Reset file input
+    e.target.value = '';
 }
 
-// Helper functions for mapping imported data
 function mapCallType(value) {
     const lower = (value || '').toLowerCase();
-    if (lower.includes('har') || lower.includes('html') || lower.includes('collection')) {
-        return 'har_collection';
-    }
-    if (lower.includes('verification') || lower.includes('attempt')) {
-        return 'verification_attempt';
-    }
-    if (lower.includes('issue') || lower.includes('check')) {
-        return 'issue_check';
-    }
-    return 'har_collection'; // default
+    if (lower.includes('har') || lower.includes('html') || lower.includes('collection')) return 'har_collection';
+    if (lower.includes('verification') || lower.includes('attempt')) return 'verification_attempt';
+    if (lower.includes('issue') || lower.includes('check')) return 'issue_check';
+    return 'har_collection';
 }
 
 function mapStatus(value) {
@@ -1151,8 +1251,7 @@ function mapStatus(value) {
     if (lower.includes('progress')) return 'in_progress';
     if (lower.includes('complete')) return 'completed';
     if (lower.includes('error') || lower.includes('issue')) return 'error';
-    if (lower.includes('pending')) return 'pending';
-    return 'pending'; // default
+    return 'pending';
 }
 
 function mapConnectionStatus(value) {
@@ -1160,10 +1259,13 @@ function mapConnectionStatus(value) {
     if (lower.includes('success') || lower.includes('connected')) return 'success';
     if (lower.includes('failed') || lower.includes('fail')) return 'failed';
     if (lower.includes('error') || lower.includes('code')) return 'error_code';
-    return 'not_tested'; // default
+    return 'not_tested';
 }
 
-// Utility Functions
+// =====================================================
+// UTILITY FUNCTIONS
+// =====================================================
+
 function formatDate(dateString) {
     if (!dateString) return 'N/A';
     const date = new Date(dateString);
@@ -1213,6 +1315,30 @@ function formatConnectionStatus(status) {
     return statuses[status] || status;
 }
 
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function getFileIconClass(filename) {
+    const ext = filename.split('.').pop().toLowerCase();
+    if (ext === 'har') return 'har';
+    if (['html', 'htm'].includes(ext)) return 'html';
+    if (['png', 'jpg', 'jpeg', 'gif'].includes(ext)) return 'image';
+    if (ext === 'pdf') return 'pdf';
+    return 'other';
+}
+
+function getFileIcon(filename) {
+    const ext = filename.split('.').pop().toLowerCase();
+    if (ext === 'har') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+    if (['html', 'htm'].includes(ext)) return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
+    if (['png', 'jpg', 'jpeg', 'gif'].includes(ext)) return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
+    if (ext === 'pdf') return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+}
+
 function escapeHtml(text) {
     if (!text) return '';
     const div = document.createElement('div');
@@ -1230,4 +1356,3 @@ function showToast(message, type = 'success') {
         toast.classList.remove('show');
     }, 3000);
 }
-
